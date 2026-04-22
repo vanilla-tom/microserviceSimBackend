@@ -216,7 +216,7 @@ class SimulationService:
         task = await self.get_task(task_id)
         if task.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
             await process_manager.cancel_simulation(task_id)
-            await self._repo.set_failed(task_id, "Cancelled by user")
+            await self._repo.set_completed(task_id)
         return await self.get_task(task_id)
 
     async def delete_task(self, task_id: str) -> None:

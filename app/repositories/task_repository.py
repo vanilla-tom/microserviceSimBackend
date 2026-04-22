@@ -91,8 +91,8 @@ class TaskRepository:
         db = await get_db()
         now = datetime.now(timezone.utc).isoformat()
         await db.execute(
-            """UPDATE tasks SET status='completed', end_time=?, pid=NULL
-               WHERE task_id=? AND status='running'""",
+            """UPDATE tasks SET status='completed', end_time=?, error_message=NULL, pid=NULL
+               WHERE task_id=? AND status IN ('pending', 'running')""",
             (now, task_id),
         )
         await db.commit()

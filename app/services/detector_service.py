@@ -157,7 +157,7 @@ def load_detector_datas(task: Task, sim_time: int, sensor_id: int) -> DetectorDa
     path = csv_path_for_simulation_task(task)
     by_id = build_sensor_datas_by_id(path, sim_time)
     if sensor_id not in by_id:
-        raise DetectorError(f"Sensor id not found: {sensor_id}", 404)
+        return DetectorDatasResponse(datas=[])
     return DetectorDatasResponse(datas=by_id[sensor_id])
 
 
@@ -203,3 +203,38 @@ def load_detector_list(task: Task) -> DetectorListResponse:
     launch = read_launch_params(task)
     path = sensor_view_csv_path_from_launch(launch)
     return build_detector_list(path)
+
+
+def undamaged_detector_count_for_task(task: Task) -> int:
+    """Count sensors whose sequence is not ``destroyed`` (sensor_view CSV). Returns 0 if unavailable."""
+    try:
+        return sum(1 for item in load_detector_list(task).sensor if item.status)
+    except DetectorError:
+        return 0
+
+
+def workload_peak_packets_per_second_for_task(task: Task) -> int:
+    """Peak CSV row count per wall-clock second using ``时间戳_ms`` on the workload CSV. Returns 0 if unavailable."""
+    try:
+        launch = read_launch_params(task)
+        path = workload_csv_path_from_launch(launch)
+    except DetectorError:
+        return 0
+    per_second: dict[int, int] = defaultdict(int)
+    try:
+        with path.open(encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            if reader.fieldnames is None or "时间戳_ms" not in reader.fieldnames:
+                return 0
+            for row in reader:
+                raw = row.get("时间戳_ms")
+                if raw is None or str(raw).strip() == "":
+                    continue
+                try:
+                    ts_ms = int(float(raw))
+                except (TypeError, ValueError):
+                    continue
+                per_second[ts_ms // 1000] += 1
+    except OSError:
+        return 0
+    return max(per_second.values()) if per_second else 0

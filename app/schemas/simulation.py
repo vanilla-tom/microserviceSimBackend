@@ -48,6 +48,11 @@ class ErrorResponse(BaseModel):
     error: str
 
 
+class ResourceLogEntry(BaseModel):
+    time: int
+    message: str
+
+
 class VmTypeInfo(BaseModel):
     """VM类型信息"""
     name: str
@@ -75,7 +80,7 @@ class VmSnapshot(BaseModel):
     """VM快照数据"""
     vm_id: str
     vm_type: str
-    memory_usage_mb: float
+    memory_usage: float
     queue_length: int
     running_length: int
 
@@ -83,6 +88,7 @@ class VmSnapshot(BaseModel):
 class HostSnapshot(BaseModel):
     """Host快照数据"""
     host_id: str
+    status: bool  # True=节点正常；False=该 host 在 sim_time 前发生过 vm_lifecycle crash
     cpu_usage: float
     memory_usage: float
     vm_count: int
@@ -126,7 +132,7 @@ class CallChainVmNode(BaseModel):
     vm_type: str
     layer: str
     host_id: str
-    memory_usage_mb: float
+    memory_usage: float
     queue_length: int
     running_length: int
 
@@ -191,6 +197,8 @@ class SimulationSummaryResponse(BaseModel):
     latency_stats: LatencySummary
     event_counts: Dict[str, int]
     parse_errors: int = 0
+    detector_count: int = 0
+    target_count_peak: int = 0
 
 
 class TargetsResponse(BaseModel):

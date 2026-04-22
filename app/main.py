@@ -29,6 +29,7 @@ from app.exceptions.domain import (
 from app.repositories.task_repository import TaskRepository
 from app.routers.detector import router as detector_router
 from app.routers.replay import router as replay_router
+from app.routers.resource_log import router as resource_log_router
 from app.routers.simulations import router as simulations_router
 from app.services import process_manager
 from app.services.replay_service import ReplayService
@@ -88,6 +89,7 @@ app.add_middleware(
 # Routers
 app.include_router(simulations_router)
 app.include_router(replay_router)
+app.include_router(resource_log_router)
 app.include_router(detector_router)
 
 

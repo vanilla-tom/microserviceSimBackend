@@ -236,11 +236,26 @@ class SimulationDataProcessor:
             return None
         return times[idx]
 
+    def _host_ids_with_lifecycle_crash_at_or_before(self, sim_time: int) -> set[str]:
+        """Hosts that have at least one vm_lifecycle crash event at or before sim_time."""
+        crashed: set[str] = set()
+        for ev in self.data.get_events_in_range(0, sim_time, {"vm_lifecycle"}):
+            if ev.get("operation") != "crash":
+                continue
+            hid = ev.get("host_id")
+            if hid is None and isinstance(ev.get("details"), dict):
+                hid = ev["details"].get("host_id")
+            if hid is None or hid == "":
+                continue
+            crashed.add(str(hid))
+        return crashed
+
     def get_all_hosts_snapshot(self, sim_time: int) -> dict[str, Any]:
         snapshot = self.get_snapshot_at_time(sim_time)
         if snapshot is None:
             return {"sim_time": sim_time, "hosts": []}
 
+        crashed_hosts = self._host_ids_with_lifecycle_crash_at_or_before(sim_time)
         hosts = []
         for host in snapshot.get("hosts", []) or []:
             vms = []
@@ -248,12 +263,14 @@ class SimulationDataProcessor:
                 vms.append({
                     "vm_id": str(vm.get("vm_id", "unknown")),
                     "vm_type": str(vm.get("vm_type", "unknown")),
-                    "memory_usage_mb": _safe_float(vm.get("memory_usage_mb")),
+                    "memory_usage": _safe_float(vm.get("memory_usage")),
                     "queue_length": _safe_int(vm.get("queue_length")),
                     "running_length": _safe_int(vm.get("running_length")),
                 })
+            host_id = str(host.get("host_id", "unknown"))
             hosts.append({
-                "host_id": str(host.get("host_id", "unknown")),
+                "host_id": host_id,
+                "status": host_id not in crashed_hosts,
                 "cpu_usage": _safe_float(host.get("cpu_usage")),
                 "memory_usage": _safe_float(host.get("memory_usage")),
                 "vm_count": _safe_int(host.get("vm_count"), len(vms)),
@@ -306,14 +323,14 @@ class SimulationDataProcessor:
             if found is None:
                 continue
             timestamps.append(event["t"] / 1000)
-            memory_usage.append(_safe_float(found.get("memory_usage_mb")))
+            memory_usage.append(_safe_float(found.get("memory_usage")))
             queue_length.append(_safe_int(found.get("queue_length")))
             running_length.append(_safe_int(found.get("running_length")))
 
         return {
             "time_range": {"start": start_time, "end": end_time},
             "series": {
-                "memory": {"name": "内存使用(MB)", "data": list(zip(timestamps, memory_usage))},
+                "memory": {"name": "内存利用率", "data": list(zip(timestamps, memory_usage))},
                 "queue": {"name": "队列长度", "data": list(zip(timestamps, queue_length))},
                 "running": {"name": "运行任务数", "data": list(zip(timestamps, running_length))},
             },
@@ -354,7 +371,7 @@ class SimulationDataProcessor:
                     "vm_type": vm_type,
                     "layer": layer,
                     "host_id": host_id,
-                    "memory_usage_mb": _safe_float(vm.get("memory_usage_mb")),
+                    "memory_usage": _safe_float(vm.get("memory_usage")),
                     "queue_length": _safe_int(vm.get("queue_length")),
                     "running_length": _safe_int(vm.get("running_length")),
                 }
@@ -387,6 +404,34 @@ class SimulationDataProcessor:
         )
 
         return {"sim_time": sim_time, "hosts": host_entries, "layer_order": layer_order}
+
+    _RESOURCE_LOG_MAX = 100
+
+    def get_algorithm_resource_messages(self, sim_time: int) -> list[dict[str, Any]]:
+        """algorithm_event rows with message_zh, at or before sim_time; newest 100 by t, then ascending."""
+        rows: list[tuple[int, int, str]] = []
+        seq = 0
+        for ev in self.data.by_type.get("algorithm_event", []):
+            t = ev["t"]
+            if t > sim_time:
+                continue
+            msg = ev.get("message_zh")
+            if isinstance(msg, str) and msg.strip():
+                text = msg.strip()
+            else:
+                raw = (ev.get("details") or {}).get("message_zh")
+                if not isinstance(raw, str) or not raw.strip():
+                    continue
+                text = raw.strip()
+            rows.append((t, seq, text))
+            seq += 1
+
+        rows.sort(key=lambda item: (-item[0], -item[1]))
+        rows = rows[: self._RESOURCE_LOG_MAX]
+        rows.sort(key=lambda item: (item[0], item[1]))
+        li = [{"time": t, "message": text} for t, _, text in rows]
+        li.reverse()
+        return li
 
     def _iter_type_callchain_events(self) -> list[dict[str, Any]]:
         return [

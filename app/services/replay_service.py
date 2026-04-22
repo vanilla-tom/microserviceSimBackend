@@ -7,8 +7,13 @@ from typing import Any, ClassVar
 
 from app.config import settings
 from app.exceptions.domain import TaskNotFoundError
+from app.models.task import Task
 from app.path_constants import metrics_jsonl_paths
 from app.repositories.task_repository import TaskRepository
+from app.services.detector_service import (
+    undamaged_detector_count_for_task,
+    workload_peak_packets_per_second_for_task,
+)
 from app.services.jsonl_service import IncrementalJsonlReader, SimulationDataProcessor
 
 
@@ -44,7 +49,12 @@ class ReplayService:
         while len(cls._processors) > limit:
             cls._processors.popitem(last=False)
 
-    async def _get_processor(self, task_id: str) -> SimulationDataProcessor:
+    async def _get_processor(
+        self,
+        task_id: str,
+        *,
+        task: Task | None = None,
+    ) -> SimulationDataProcessor:
         with self._cache_lock:
             existing = self._processors.get(task_id)
         if existing is not None:
@@ -53,7 +63,8 @@ class ReplayService:
                 self._processors.move_to_end(task_id)
             return existing
 
-        task = await self._repo.get_task(task_id)
+        if task is None:
+            task = await self._repo.get_task(task_id)
         if task is None:
             raise TaskNotFoundError(task_id)
 
@@ -85,7 +96,13 @@ class ReplayService:
         return (await self._get_processor(task_id)).get_timeline(start_time, end_time, interval_ms)
 
     async def get_summary(self, task_id: str) -> dict[str, Any]:
-        return (await self._get_processor(task_id)).get_summary()
+        task = await self._repo.get_task(task_id)
+        if task is None:
+            raise TaskNotFoundError(task_id)
+        summary = (await self._get_processor(task_id, task=task)).get_summary()
+        summary["detector_count"] = undamaged_detector_count_for_task(task)
+        summary["target_count_peak"] = workload_peak_packets_per_second_for_task(task)
+        return summary
 
     async def get_latest_snapshot_time_at_or_before(
         self,
@@ -132,3 +149,6 @@ class ReplayService:
         target_id: int,
     ) -> dict[str, Any]:
         return (await self._get_processor(task_id)).get_target_call_chain(sim_time, target_id)
+
+    async def get_resource_log(self, task_id: str, sim_time: int) -> list[dict[str, Any]]:
+        return (await self._get_processor(task_id)).get_algorithm_resource_messages(sim_time)

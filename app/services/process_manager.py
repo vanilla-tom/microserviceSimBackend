@@ -129,7 +129,8 @@ async def _run_simulation(task_id: str) -> None:
 
     except asyncio.CancelledError:
         logger.info("Simulation %s was cancelled", task_id)
-        await _task_repo.set_failed(task_id, "Cancelled by user")
+        # Status is set by the caller (e.g. cancel API or shutdown_all both use set_completed).
+        raise
     except Exception as e:
         logger.exception("Unexpected error running simulation %s", task_id)
         await _task_repo.set_failed(task_id, str(e)[:2000])
@@ -177,7 +178,7 @@ async def shutdown_all() -> None:
     task_ids = list(_processes.keys())
     for task_id in task_ids:
         await cancel_simulation(task_id)
-        await _task_repo.set_failed(task_id, "Server shutdown")
+        await _task_repo.set_completed(task_id)
 
     # Wait for background tasks to finish
     pending = [t for t in _tasks.values() if not t.done()]
