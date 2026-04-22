@@ -3,9 +3,16 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
-from typing import Any, Optional, List
+from typing import Any, List, Optional
 
 import aiofiles
+
+from app.path_constants import (
+    METRICS_JSONL_FILENAMES,
+    SIM_DEFAULT_CONFIG_RELATIVE_PATHS,
+    TASK_CONFIG_FILENAME,
+    TASK_OUTPUT_SUBDIR,
+)
 
 
 def _safe_task_dir(data_dir: Path, task_id: str) -> Path:
@@ -21,9 +28,9 @@ def _safe_task_dir(data_dir: Path, task_id: str) -> Path:
 async def setup_task_directory(data_dir: Path, task_id: str) -> tuple[Path, Path]:
     """Create task directory structure. Returns (config_path, output_dir)."""
     task_dir = _safe_task_dir(data_dir, task_id)
-    output_dir = task_dir / "output"
+    output_dir = task_dir / TASK_OUTPUT_SUBDIR
     output_dir.mkdir(parents=True, exist_ok=True)
-    config_path = task_dir / "config.conf"
+    config_path = task_dir / TASK_CONFIG_FILENAME
     return config_path, output_dir
 
 
@@ -35,10 +42,7 @@ async def save_uploaded_config(upload_content: bytes, dest_path: Path) -> None:
 
 async def copy_default_config(sim_project_dir: Path, dest_path: Path) -> None:
     """Copy default config from simulation project."""
-    default_paths = [
-        sim_project_dir / "config" / "simulation.conf",
-        sim_project_dir / "simulation.conf",
-    ]
+    default_paths = [sim_project_dir / rel for rel in SIM_DEFAULT_CONFIG_RELATIVE_PATHS]
     for src in default_paths:
         if src.is_file():
             async with aiofiles.open(str(src), "rb") as sf:
@@ -49,11 +53,6 @@ async def copy_default_config(sim_project_dir: Path, dest_path: Path) -> None:
     raise FileNotFoundError(
         f"Default config not found in {sim_project_dir}"
     )
-
-
-async def save_target_distribution(target_distribution: dict[str, Any], dest_path: Path) -> None:
-    async with aiofiles.open(str(dest_path), "w", encoding="utf-8") as f:
-        await f.write(json.dumps(target_distribution, ensure_ascii=False, indent=2))
 
 
 async def patch_config_output_dir(config_path: Path, output_dir: Path) -> None:
@@ -67,11 +66,26 @@ async def patch_config_output_dir(config_path: Path, output_dir: Path) -> None:
         await f.write(override_line)
 
 
-async def patch_config_target_distribution_path(config_path: Path, target_distribution_path: Path) -> None:
-    abs_target = target_distribution_path.resolve().as_posix()
-    override_line = f'\nworkload.targetDistributionJsonPath = "{abs_target}"\n'
+async def patch_config_launch_overrides(
+    config_path: Path,
+    *,
+    chaos_enable: bool,
+    workload_csv_path: Path,
+) -> None:
+    """Append chaos.enable and workload.csv.resourcePath (HOCON last-key-wins)."""
+    abs_csv = workload_csv_path.resolve().as_posix()
+    chaos_lit = str(chaos_enable).lower()
+    block = (
+        f"\nchaos.enable = {chaos_lit}\n"
+        f'workload.csv.resourcePath = "{abs_csv}"\n'
+    )
     async with aiofiles.open(str(config_path), "a", encoding="utf-8") as f:
-        await f.write(override_line)
+        await f.write(block)
+
+
+async def save_launch_params(record: dict[str, Any], dest_path: Path) -> None:
+    async with aiofiles.open(str(dest_path), "w", encoding="utf-8") as f:
+        await f.write(json.dumps(record, ensure_ascii=False, indent=2))
 
 
 def cleanup_task_directory(data_dir: Path, task_id: str) -> None:
@@ -94,10 +108,7 @@ def find_result_files(output_dir: Path) -> Optional[List[Path]]:
         return None
 
     # Prefer JSONL (future format)
-    jsonl_candidates = [
-        output_dir / "simulation_metrics.jsonl",
-        output_dir / "metrics.jsonl",
-    ]
+    jsonl_candidates = [output_dir / name for name in METRICS_JSONL_FILENAMES]
     for jsonl in jsonl_candidates:
         if jsonl.is_file():
             return [jsonl]

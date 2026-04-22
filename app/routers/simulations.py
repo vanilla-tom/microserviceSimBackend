@@ -15,12 +15,12 @@ router = APIRouter(prefix="/simulations", tags=["simulations"])
 
 @router.post("", status_code=200)
 async def create_simulation(
-    payload: Optional[CreateSimulationRequest] = None,
+    payload: CreateSimulationRequest,
     service: SimulationService = Depends(get_simulation_service),
 ):
     """Start a new simulation task."""
     task_id = await service.create_simulation(
-        target_distribution=payload.target_distribution if payload is not None else None,
+        launch_params=payload.target_distribution,
     )
     return {"task_id": task_id, "status": "pending"}
 
@@ -53,7 +53,7 @@ async def get_simulation_config(
 ):
     return {
         "task_id": task_id,
-        "target_distribution": await service.get_target_distribution(task_id),
+        "target_distribution": await service.get_launch_params(task_id),
     }
 
 

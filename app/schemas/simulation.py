@@ -2,11 +2,43 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+
+
+class SimulationLaunchParams(BaseModel):
+    """Frontend launch options (nested under `target_distribution` in the API body)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    scenario: str = Field(
+        ...,
+        validation_alias=AliasChoices("scenario", "senario"),
+        serialization_alias="scenario",
+    )
+    data_source: str = Field(
+        ...,
+        validation_alias=AliasChoices("dataSource", "data_source"),
+        serialization_alias="dataSource",
+    )
+    enable_sensor_failure: bool = Field(
+        ...,
+        validation_alias=AliasChoices(
+            "enableSensorFailure", "enable_sensor_failure"
+        ),
+        serialization_alias="enableSensorFailure",
+    )
+    enable_node_failure: bool = Field(
+        ...,
+        validation_alias=AliasChoices("enableNodeFailure", "enable_node_failure"),
+        serialization_alias="enableNodeFailure",
+    )
 
 
 class CreateSimulationRequest(BaseModel):
-    target_distribution: Dict[str, Any] = Field(..., description="target-distribution.json content")
+    target_distribution: SimulationLaunchParams = Field(
+        ...,
+        description="Scenario, data source, and failure flags for HOCON overrides",
+    )
 
 
 # === Simulation Replay API Schemas ===
@@ -110,21 +142,10 @@ class CallChainHost(BaseModel):
     vms: List[CallChainVmNode]
 
 
-class CallChainLink(BaseModel):
-    """调用链边"""
-    source: str
-    target: str
-    source_layer: str
-    target_layer: str
-    source_host_id: str
-    target_host_id: str
-
-
 class CallChainResponse(BaseModel):
     """调用链数据响应（Host容器 + VM级拓扑）"""
     sim_time: int
     hosts: List[CallChainHost]
-    links: List[CallChainLink]
     layer_order: List[str]
 
 
@@ -170,3 +191,19 @@ class SimulationSummaryResponse(BaseModel):
     latency_stats: LatencySummary
     event_counts: Dict[str, int]
     parse_errors: int = 0
+
+
+class TargetsResponse(BaseModel):
+    targets: List[int]
+
+
+class TargetCallChainRecord(BaseModel):
+    time: int
+    recognition_mods: List[str]
+    fusion_mods: List[str]
+    event: str
+
+
+class TargetCallChainResponse(BaseModel):
+    sim_time: int
+    records: List[TargetCallChainRecord]

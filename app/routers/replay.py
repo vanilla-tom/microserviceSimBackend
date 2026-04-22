@@ -15,6 +15,8 @@ from app.schemas.simulation import (
     HostHistoryResponse,
     SimulationMetadataResponse,
     SimulationSummaryResponse,
+    TargetCallChainResponse,
+    TargetsResponse,
     TimelineResponse,
     VmHistoryResponse,
 )
@@ -132,6 +134,36 @@ async def get_call_chain(
     Returns host containers, VM nodes, and VM-level links based on layer ordering.
     """
     return await replay.get_call_chain(task_id, sim_time)
+
+
+@router.get(
+    "/{task_id}/targets",
+    response_model=TargetsResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+async def get_targets(
+    task_id: str,
+    sim_time: int = Query(..., description="Simulation time in milliseconds"),
+    replay: ReplayService = Depends(get_replay_service),
+):
+    """Get list of target IDs that have call-chain data at or before sim_time."""
+    targets = await replay.get_targets(task_id, sim_time)
+    return {"targets": targets}
+
+
+@router.get(
+    "/{task_id}/target-hist",
+    response_model=TargetCallChainResponse,
+    responses={404: {"model": ErrorResponse}},
+)
+async def get_target_hist(
+    task_id: str,
+    sim_time: int = Query(..., description="Simulation time in milliseconds"),
+    target_id: int = Query(..., description="Target ID"),
+    replay: ReplayService = Depends(get_replay_service),
+):
+    """Get per-target call-chain history with heuristic event attribution."""
+    return await replay.get_target_call_chain(task_id, sim_time, target_id)
 
 
 @router.websocket("/{task_id}/stream")

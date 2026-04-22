@@ -8,3 +8,5 @@ data/
 *.db
 .venv/
 venv/
+datasources
+test*

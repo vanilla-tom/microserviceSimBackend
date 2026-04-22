@@ -8,6 +8,7 @@ from typing import Any, Optional, Sequence
 from uuid import uuid4
 
 from app.config import settings
+from app.path_constants import TASK_LAUNCH_PARAMS_FILENAME
 from app.exceptions.domain import (
     DefaultConfigNotFoundError,
     EmptyUploadedConfigError,
@@ -21,20 +22,27 @@ from app.exceptions.domain import (
 from app.models.task import Task, TaskStatus
 from app.repositories.task_repository import TaskRepository
 from app.services import process_manager
+from app.services.replay_service import ReplayService
+from app.schemas.simulation import SimulationLaunchParams
 from app.utils.file_helpers import (
     cleanup_task_directory,
     copy_default_config,
     find_result_files,
+    patch_config_launch_overrides,
     patch_config_output_dir,
-    patch_config_target_distribution_path,
+    save_launch_params,
     save_uploaded_config,
-    save_target_distribution,
     setup_task_directory,
 )
 
 
 def _generate_task_id() -> str:
     return f"sim_{int(time.time())}_{uuid4().hex[:6]}"
+
+
+def _workload_csv_filename(params: SimulationLaunchParams) -> str:
+    suffix = "damaged" if params.enable_sensor_failure else "normal"
+    return f"{params.scenario}_{params.data_source}_{suffix}.csv"
 
 
 @dataclass(frozen=True)
@@ -50,7 +58,7 @@ class SimulationService:
 
     async def create_simulation(
         self,
-        target_distribution: Optional[dict[str, Any]] = None,
+        launch_params: SimulationLaunchParams,
         config_upload: Optional[bytes] = None,
     ) -> str:
         task_id = _generate_task_id()
@@ -58,7 +66,8 @@ class SimulationService:
             config_path, output_dir = await setup_task_directory(
                 settings.DATA_DIR, task_id
             )
-            target_distribution_path = output_dir.parent / "target-distribution.json"
+            task_dir = output_dir.parent
+            launch_params_path = task_dir / TASK_LAUNCH_PARAMS_FILENAME
 
             if config_upload is not None:
                 if not config_upload:
@@ -70,15 +79,26 @@ class SimulationService:
                 except FileNotFoundError as e:
                     raise DefaultConfigNotFoundError(str(e)) from e
 
-            if target_distribution is None:
-                default_target = settings.SIM_PROJECT_DIR / "config" / "target-distribution.json"
-                if not default_target.is_file():
-                    raise DefaultConfigNotFoundError(f"Default target distribution not found: {default_target}")
-                target_distribution = json.loads(default_target.read_text(encoding="utf-8"))
+            filename = _workload_csv_filename(launch_params)
+            csv_path = settings.SOURCE_DATA_DIR / filename
+            if not csv_path.is_file():
+                raise DefaultConfigNotFoundError(
+                    f"Workload CSV not found: {csv_path} (expected under SOURCE_DATA_DIR)"
+                )
 
-            await save_target_distribution(target_distribution, target_distribution_path)
             await patch_config_output_dir(config_path, output_dir)
-            await patch_config_target_distribution_path(config_path, target_distribution_path)
+            await patch_config_launch_overrides(
+                config_path,
+                chaos_enable=launch_params.enable_node_failure,
+                workload_csv_path=csv_path,
+            )
+
+            record: dict[str, Any] = {
+                **launch_params.model_dump(mode="json", by_alias=True),
+                "filename": filename,
+                "resourcePath": csv_path.resolve().as_posix(),
+            }
+            await save_launch_params(record, launch_params_path)
 
             await self._repo.create_task(
                 task_id=task_id,
@@ -186,10 +206,11 @@ class SimulationService:
 
         if task.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
             await process_manager.cancel_simulation(task_id)
-            await self._repo.set_failed(task_id, "Cancelled by user")
+            await self._repo.set_completed(task_id)
 
         cleanup_task_directory(settings.DATA_DIR, task_id)
         await self._repo.delete_task(task_id)
+        ReplayService.evict_processor(task_id)
 
     async def cancel_task(self, task_id: str) -> Task:
         task = await self.get_task(task_id)
@@ -201,14 +222,12 @@ class SimulationService:
     async def delete_task(self, task_id: str) -> None:
         await self.cancel_and_delete(task_id)
 
-    async def get_target_distribution(self, task_id: str) -> dict[str, Any]:
+    async def get_launch_params(self, task_id: str) -> dict[str, Any]:
         task = await self.get_task(task_id)
         task_dir = Path(task.output_dir or "").parent
-        target_distribution_path = task_dir / "target-distribution.json"
-        if target_distribution_path.is_file():
-            return json.loads(target_distribution_path.read_text(encoding="utf-8"))
-
-        default_target = settings.SIM_PROJECT_DIR / "config" / "target-distribution.json"
-        if not default_target.is_file():
-            raise DefaultConfigNotFoundError(f"Default target distribution not found: {default_target}")
-        return json.loads(default_target.read_text(encoding="utf-8"))
+        launch_params_path = task_dir / TASK_LAUNCH_PARAMS_FILENAME
+        if not launch_params_path.is_file():
+            raise DefaultConfigNotFoundError(
+                f"Launch params not found for task: {launch_params_path}"
+            )
+        return json.loads(launch_params_path.read_text(encoding="utf-8"))

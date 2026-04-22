@@ -4,6 +4,7 @@ import bisect
 import json
 import logging
 from dataclasses import dataclass, field
+from itertools import groupby
 from pathlib import Path
 from statistics import mean
 from typing import Any, Optional
@@ -326,7 +327,6 @@ class SimulationDataProcessor:
             return {
                 "sim_time": sim_time,
                 "hosts": [],
-                "links": [],
                 "layer_order": layer_order,
             }
 
@@ -379,28 +379,6 @@ class SimulationDataProcessor:
                 "vms": vm_entries,
             })
 
-        links = []
-        seen_links: set[tuple[str, str]] = set()
-        for index in range(len(layer_order) - 1):
-            src_layer = layer_order[index]
-            dst_layer = layer_order[index + 1]
-            src_vms = layer_vms.get(src_layer, [])
-            dst_vms = layer_vms.get(dst_layer, [])
-            for src in src_vms:
-                for dst in dst_vms:
-                    link_key = (src["id"], dst["id"])
-                    if link_key in seen_links:
-                        continue
-                    seen_links.add(link_key)
-                    links.append({
-                        "source": src["id"],
-                        "target": dst["id"],
-                        "source_layer": src_layer,
-                        "target_layer": dst_layer,
-                        "source_host_id": src["host_id"],
-                        "target_host_id": dst["host_id"],
-                    })
-
         host_entries.sort(
             key=lambda host: (
                 layer_rank.get(host["layers"][0], len(layer_rank)) if host["layers"] else len(layer_rank),
@@ -408,7 +386,131 @@ class SimulationDataProcessor:
             )
         )
 
-        return {"sim_time": sim_time, "hosts": host_entries, "links": links, "layer_order": layer_order}
+        return {"sim_time": sim_time, "hosts": host_entries, "layer_order": layer_order}
+
+    def _iter_type_callchain_events(self) -> list[dict[str, Any]]:
+        return [
+            ev for ev in self.data.by_type.get("algorithm_event", [])
+            if ev.get("algorithm_name") == "type_callchain"
+        ]
+
+    _CRASH_WINDOW_MS = 1000
+
+    def _build_crash_index(self) -> dict[str, list[int]]:
+        """Map vm_id -> sorted list of crash timestamps."""
+        index: dict[str, list[int]] = {}
+        for ev in self.data.by_type.get("vm_lifecycle", []):
+            if ev.get("operation") == "crash":
+                vm_id = str(ev.get("vm_id", ""))
+                index.setdefault(vm_id, []).append(ev["t"])
+        for times in index.values():
+            times.sort()
+        return index
+
+    def _is_crash(self, vm_id: str, timestamp: int, crash_index: dict[str, list[int]]) -> bool:
+        times = crash_index.get(vm_id)
+        if not times:
+            return False
+        idx = bisect.bisect_left(times, timestamp - self._CRASH_WINDOW_MS)
+        return idx < len(times) and times[idx] <= timestamp + self._CRASH_WINDOW_MS
+
+    def get_targets(self, sim_time: int) -> list[int]:
+        targets: set[int] = set()
+        for ev in self._iter_type_callchain_events():
+            if ev["t"] > sim_time:
+                continue
+            details = ev.get("details") or {}
+            raw = details.get("type")
+            if raw is not None:
+                try:
+                    targets.add(int(raw))
+                except (TypeError, ValueError):
+                    pass
+        return sorted(targets)
+
+    def get_target_call_chain(self, sim_time: int, target_id: int) -> dict[str, Any]:
+        target_str = str(target_id)
+        crash_index = self._build_crash_index()
+
+        relevant = [
+            ev for ev in self._iter_type_callchain_events()
+            if ev["t"] <= sim_time
+            and (ev.get("details") or {}).get("type") == target_str
+        ]
+        relevant.sort(key=lambda ev: ev["t"])
+
+        recognition_mods: set[str] = set()
+        fusion_mods: set[str] = set()
+        records: list[dict[str, Any]] = []
+
+        for timestamp, group in groupby(relevant, key=lambda ev: ev["t"]):
+            events_in_group = list(group)
+            had_modules = bool(recognition_mods or fusion_mods)
+            has_crash = False
+            has_added = False
+            has_removed_non_crash = False
+
+            for ev in events_in_group:
+                details = ev.get("details") or {}
+                vm_id = str(details.get("vmId", ""))
+                layer = str(details.get("layer", "")).upper()
+                decision = ev.get("decision_type", "")
+
+                if decision == "ADDED":
+                    has_added = True
+                    if layer == "RECOGNIZER":
+                        recognition_mods.add(vm_id)
+                    elif layer == "ANALYZER":
+                        fusion_mods.add(vm_id)
+                elif decision == "REMOVED":
+                    if self._is_crash(vm_id, timestamp, crash_index):
+                        has_crash = True
+                    else:
+                        has_removed_non_crash = True
+                        recognition_mods.discard(vm_id)
+                        fusion_mods.discard(vm_id)
+
+            event_label = self._determine_event_label(
+                had_modules=had_modules,
+                has_added=has_added,
+                has_crash=has_crash,
+                has_removed_non_crash=has_removed_non_crash,
+                modules_remain=bool(recognition_mods or fusion_mods),
+            )
+
+            records.append({
+                "time": timestamp,
+                "recognition_mods": sorted(recognition_mods),
+                "fusion_mods": sorted(fusion_mods),
+                "event": event_label,
+            })
+
+        return {"sim_time": sim_time, "records": records}
+
+    @staticmethod
+    def _determine_event_label(
+        *,
+        had_modules: bool,
+        has_added: bool,
+        has_crash: bool,
+        has_removed_non_crash: bool,
+        modules_remain: bool,
+    ) -> str:
+        """Pick the most significant event label for a timestamp group.
+
+        Priority: 节点损毁 > 初始分配 > 负载均衡/微服务扩容 > 微服务缩容 > 处理完毕
+        """
+        if has_crash:
+            return "节点损毁"
+        if has_added and not had_modules:
+            return "初始分配"
+        if has_added:
+            return "负载均衡/微服务扩容"
+        if has_removed_non_crash and modules_remain:
+            return "微服务缩容"
+        if has_removed_non_crash and not modules_remain:
+            return "处理完毕"
+        return "未知"
 
     def get_timeline(self, start_time: int, end_time: int, interval_ms: int = 1000) -> dict[str, Any]:
         if interval_ms <= 0:
