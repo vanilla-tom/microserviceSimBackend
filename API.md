@@ -63,10 +63,12 @@ POST /simulations
 
 ```json
 {
-  "task_id": "sim_1234567890_abc123",
+  "task_id": "sim_datastream-s1-nf0sf0-1234567890_abc123",
   "status": "pending"
 }
 ```
+
+`task_id` 由服务端生成，包含：`sim_`、经清洗截断的 `scenario` 与 `dataSource`（单/多方向、单/多波次等语义由这两个取值的命名约定体现）、`nf0`/`nf1`（节点故障关/开）、`sf0`/`sf1`（传感器故障关/开）、Unix 秒时间戳与 6 位十六进制随机后缀（防冲突）。
 
 ---
 
@@ -90,7 +92,7 @@ GET /simulations
 {
   "tasks": [
     {
-      "task_id": "sim_1234567890_abc123",
+      "task_id": "sim_datastream-s1-nf0sf0-1234567890_abc123",
       "status": "completed",
       "progress": 100.0,
       "pid": null,
@@ -128,7 +130,7 @@ GET /simulations/{task_id}/config
 
 ```json
 {
-  "task_id": "sim_1234567890_abc123",
+  "task_id": "sim_datastream-s1-nf0sf0-1234567890_abc123",
   "target_distribution": {
     "scenario": "datastream",
     "dataSource": "s1",
@@ -174,7 +176,7 @@ GET /simulations/{task_id}/files
 
 ```json
 {
-  "task_id": "sim_1234567890_abc123",
+  "task_id": "sim_datastream-s1-nf0sf0-1234567890_abc123",
   "files": ["result.json", "events.csv", "report.pdf"]
 }
 ```
@@ -367,6 +369,7 @@ GET /simulations/{task_id}/summary
   "vm_stats": { "avg": 25.0, "peak": 40.0 },
   "cpu_stats": { "avg": 65.0, "peak": 95.0 },
   "memory_stats": { "avg": 50.0, "peak": 80.0 },
+  "resource_stats": { "peak": 95.0, "valley": 12.0 },
   "queue_stats": { "peak": 100 },
   "latency_stats": {
     "avg": 150.5,
@@ -379,6 +382,8 @@ GET /simulations/{task_id}/summary
   "parse_errors": 0
 }
 ```
+
+`resource_stats`：对每个 `resource_snapshot` 中每个 host 的 `cpu_usage` 与 `memory_usage`，先算 `max(cpu, memory)` 与 `min(cpu, memory)`；`peak` 为所有前者中的最大值，`valley` 为所有后者中的最小值且忽略不大于 0 的样本（若无可用的正值则 `valley` 为 0）。
 
 ---
 
@@ -449,10 +454,24 @@ GET /simulations/{task_id}/call-chain
 
 **Query 参数**:
 
+| 参数     | 类型 | 必填 | 说明             |
+| -------- | ---- | ---- | ---------------- |
+| sim_time | int  | 是   | 仿真时间（毫秒） |
+
+**响应** `200`: 见 `CallChainResponse`（Host/VM 拓扑快照）。
+
+### 9. 获取调用链目标历史
+
+```
+GET /simulations/{task_id}/target-hist
+```
+
+**Query 参数**:
+
 | 参数      | 类型 | 必填 | 说明             |
-| --- | --- | --- | --- |
+| --------- | ---- | ---- | ---------------- |
 | sim_time  | int  | 是   | 仿真时间（毫秒） |
-| target_id | int  | 是   | 目标id           |
+| target_id | int  | 是   | 目标 id          |
 
 **响应** `200`:
 
@@ -462,19 +481,23 @@ GET /simulations/{task_id}/call-chain
   "records": [
     {
       "time": 20000,
-      "recognition_mods": ["G0-V3-0-4", "G0-V3-0-6", ...],
-      "fusion_mods": ["G0-V4-0-7", "G1-V4-0-9", ...],
-      "event": "初始分配" | "负载均衡" | "节点损毁" | "微服务缩容" | "处理完毕" | ...
+      "preprocess_mods": ["G0-V2-0-1", "G0-V2-0-2"],
+      "recognition_mods": ["G0-V3-0-4", "G0-V3-0-6"],
+      "fusion_mods": ["G0-V4-0-7", "G1-V4-0-9"],
+      "event": "初始分配"
     },
     {
       "time": 120000,
-      "recognition_mods": ["G0-V3-0-6", ...],
-      "fusion_mods": ["G0-V4-0-7", "G1-V4-0-9", ...],
+      "preprocess_mods": ["G0-V2-0-2"],
+      "recognition_mods": ["G0-V3-0-6"],
+      "fusion_mods": ["G0-V4-0-7", "G1-V4-0-9"],
       "event": "微服务缩容"
-    },
+    }
   ]
 }
 ```
+
+`event` 由上游 `reason_event` 映射：`INITIAL_ASSIGN` → 初始分配，`SCALE_OUT` → 微服务扩容/负载均衡，`SENSOR_CHANGE` → 传感器变动，`SCALE_IN` → 微服务缩容，`NODE_FAILURE` → 节点损毁，`REQUEST_DONE` → 处理完毕。
 
 ---
 

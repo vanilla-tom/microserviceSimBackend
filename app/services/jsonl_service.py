@@ -4,10 +4,16 @@ import bisect
 import json
 import logging
 from dataclasses import dataclass, field
-from itertools import groupby
 from pathlib import Path
 from statistics import mean
 from typing import Any, Optional
+
+from app.services.type_callchain_parse import (
+    biz_matches_target,
+    distinct_biz_types,
+    parse_type_callchain_dataset,
+    type_callchain_to_target_hist_record,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +37,11 @@ def _percentile(values: list[float], q: float) -> float:
         return 0.0
     idx = min(len(values) - 1, max(0, int(round((len(values) - 1) * q))))
     return values[idx]
+
+
+def _min_positive(values: list[float]) -> float:
+    pos = [v for v in values if v > 0]
+    return min(pos) if pos else 0.0
 
 
 @dataclass
@@ -93,12 +104,31 @@ class SimulationData:
         return events[idx - 1]
 
 
+def _decode_jsonl_line(line: bytes) -> str:
+    """Decode one JSONL line; tolerate UTF-8 vs GB18030 (common on Windows)."""
+    if not line:
+        return ""
+    text: str
+    for enc in ("utf-8", "gb18030"):
+        try:
+            text = line.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        text = line.decode("utf-8", errors="replace")
+        logger.warning(
+            "JSONL line could not be decoded as utf-8 or gb18030; using utf-8 replacement characters"
+        )
+    return text.lstrip("\ufeff")
+
+
 class IncrementalJsonlReader:
     def __init__(self, file_path: Path):
         self.file_path = file_path
         self._data = SimulationData()
         self._offset = 0
-        self._pending = ""
+        self._pending_bytes = b""
         self._last_size = 0
 
     def refresh(self) -> SimulationData:
@@ -109,27 +139,27 @@ class IncrementalJsonlReader:
         if size < self._offset:
             self._data = SimulationData()
             self._offset = 0
-            self._pending = ""
+            self._pending_bytes = b""
 
         if size == self._offset:
             return self._data
 
-        with open(self.file_path, "r", encoding="utf-8") as handle:
+        with open(self.file_path, "rb") as handle:
             handle.seek(self._offset)
             chunk = handle.read()
             self._offset = handle.tell()
 
         self._last_size = size
-        payload = self._pending + chunk
-        lines = payload.splitlines(keepends=True)
-        self._pending = ""
+        payload = self._pending_bytes + chunk
+        parts = payload.split(b"\n")
+        self._pending_bytes = parts[-1]
 
-        for line in lines:
-            if not line.endswith("\n") and not line.endswith("\r"):
-                self._pending = line
+        for raw_line in parts[:-1]:
+            raw_line = raw_line.rstrip(b"\r")
+            if not raw_line.strip():
                 continue
 
-            candidate = line.strip()
+            candidate = _decode_jsonl_line(raw_line).strip()
             if not candidate:
                 continue
 
@@ -250,32 +280,63 @@ class SimulationDataProcessor:
             crashed.add(str(hid))
         return crashed
 
+    _SNAPSHOT_HOST_COUNT = 16
+
+    @staticmethod
+    def _snapshot_host_slot(host_id: Any) -> Optional[str]:
+        """Map raw host_id to canonical '0'..'9' if in range; else None."""
+        if host_id is None:
+            return None
+        try:
+            n = int(str(host_id).strip())
+        except (TypeError, ValueError):
+            return None
+        if 0 <= n < SimulationDataProcessor._SNAPSHOT_HOST_COUNT:
+            return str(n)
+        return None
+
     def get_all_hosts_snapshot(self, sim_time: int) -> dict[str, Any]:
         snapshot = self.get_snapshot_at_time(sim_time)
-        if snapshot is None:
-            return {"sim_time": sim_time, "hosts": []}
-
         crashed_hosts = self._host_ids_with_lifecycle_crash_at_or_before(sim_time)
-        hosts = []
-        for host in snapshot.get("hosts", []) or []:
-            vms = []
-            for vm in host.get("vms", []) or []:
-                vms.append({
-                    "vm_id": str(vm.get("vm_id", "unknown")),
-                    "vm_type": str(vm.get("vm_type", "unknown")),
-                    "memory_usage": _safe_float(vm.get("memory_usage")),
-                    "queue_length": _safe_int(vm.get("queue_length")),
-                    "running_length": _safe_int(vm.get("running_length")),
+
+        by_slot: dict[str, dict[str, Any]] = {}
+        if snapshot is not None:
+            for host in snapshot.get("hosts", []) or []:
+                slot = self._snapshot_host_slot(host.get("host_id"))
+                if slot is None:
+                    continue
+                vms = []
+                for vm in host.get("vms", []) or []:
+                    vms.append({
+                        "vm_id": str(vm.get("vm_id", "unknown")),
+                        "vm_type": str(vm.get("vm_type", "unknown")),
+                        "memory_usage": _safe_float(vm.get("memory_usage")),
+                        "queue_length": _safe_int(vm.get("queue_length")),
+                        "running_length": _safe_int(vm.get("running_length")),
+                    })
+                by_slot[slot] = {
+                    "host_id": slot,
+                    "status": slot not in crashed_hosts,
+                    "cpu_usage": _safe_float(host.get("cpu_usage")),
+                    "memory_usage": _safe_float(host.get("memory_usage")),
+                    "vm_count": _safe_int(host.get("vm_count"), len(vms)),
+                    "vms": vms,
+                }
+
+        hosts: list[dict[str, Any]] = []
+        for i in range(self._SNAPSHOT_HOST_COUNT):
+            slot = str(i)
+            if slot in by_slot:
+                hosts.append(by_slot[slot])
+            else:
+                hosts.append({
+                    "host_id": slot,
+                    "status": False,
+                    "cpu_usage": 0.0,
+                    "memory_usage": 0.0,
+                    "vm_count": 0,
+                    "vms": [],
                 })
-            host_id = str(host.get("host_id", "unknown"))
-            hosts.append({
-                "host_id": host_id,
-                "status": host_id not in crashed_hosts,
-                "cpu_usage": _safe_float(host.get("cpu_usage")),
-                "memory_usage": _safe_float(host.get("memory_usage")),
-                "vm_count": _safe_int(host.get("vm_count"), len(vms)),
-                "vms": vms,
-            })
         return {"sim_time": sim_time, "hosts": hosts}
 
     def get_host_history(self, host_id: str, start_time: int, end_time: int) -> dict[str, Any]:
@@ -407,19 +468,45 @@ class SimulationDataProcessor:
 
     _RESOURCE_LOG_MAX = 100
 
-    def get_algorithm_resource_messages(self, sim_time: int) -> list[dict[str, Any]]:
-        """algorithm_event rows with message_zh, at or before sim_time; newest 100 by t, then ascending."""
+    @staticmethod
+    def _tag_history_time_ms(raw_t: Any, event_t_ms: int) -> Optional[int]:
+        """Map tag_history `t` to wall-clock ms (either sim seconds or ms; disambiguate vs event `t`)."""
+        try:
+            t = float(raw_t)
+        except (TypeError, ValueError):
+            return None
+        cand_sec = int(round(t * 1000))
+        cand_ms = int(round(t))
+        d_sec = abs(cand_sec - event_t_ms)
+        d_ms = abs(cand_ms - event_t_ms)
+        if d_sec < d_ms:
+            return cand_sec
+        if d_ms < d_sec:
+            return cand_ms
+        if t != int(t):
+            return cand_sec
+        return cand_ms
+
+    def _collect_algorithm_messages(
+        self,
+        sim_time: int,
+        *,
+        field: str,
+        algorithm_name: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
         rows: list[tuple[int, int, str]] = []
         seq = 0
         for ev in self.data.by_type.get("algorithm_event", []):
             t = ev["t"]
             if t > sim_time:
                 continue
-            msg = ev.get("message_zh")
+            if algorithm_name is not None and ev.get("algorithm_name") != algorithm_name:
+                continue
+            msg = ev.get(field)
             if isinstance(msg, str) and msg.strip():
                 text = msg.strip()
             else:
-                raw = (ev.get("details") or {}).get("message_zh")
+                raw = (ev.get("details") or {}).get(field)
                 if not isinstance(raw, str) or not raw.strip():
                     continue
                 text = raw.strip()
@@ -433,129 +520,67 @@ class SimulationDataProcessor:
         li.reverse()
         return li
 
-    def _iter_type_callchain_events(self) -> list[dict[str, Any]]:
-        return [
-            ev for ev in self.data.by_type.get("algorithm_event", [])
-            if ev.get("algorithm_name") == "type_callchain"
-        ]
+    def get_algorithm_resource_messages(self, sim_time: int) -> list[dict[str, Any]]:
+        """algorithm_event rows with message_zh, at or before sim_time; newest 100 by t, then ascending."""
+        return self._collect_algorithm_messages(sim_time, field="message_zh")
 
-    _CRASH_WINDOW_MS = 1000
+    def get_algorithm_tag_messages(self, sim_time: int) -> list[dict[str, Any]]:
+        """Expand details.tag_history from stream_tag events with tags/layer fields; each step is one line."""
+        rows: list[tuple[int, int, str]] = []
+        seq = 0
+        for ev in self.data.by_type.get("algorithm_event", []):
+            ev_t = ev["t"]
+            if ev_t > sim_time:
+                continue
+            if ev.get("algorithm_name") != "stream_tag":
+                continue
+            details = ev.get("details") if isinstance(ev.get("details"), dict) else {}
+            hist = details.get("tag_history")
+            if not isinstance(hist, list):
+                continue
+            for item in hist:
+                if not isinstance(item, dict):
+                    continue
+                t_ms = self._tag_history_time_ms(item.get("t"), ev_t)
+                if t_ms is None or t_ms > sim_time:
+                    continue
+                sid = item.get("id")
+                tags_raw = item.get("tags")
+                if tags_raw is None:
+                    tags_raw = []
+                if isinstance(tags_raw, list):
+                    tags_str = ", ".join(str(x) for x in tags_raw)
+                else:
+                    tags_str = str(tags_raw)
+                layer_raw = item.get("layer")
+                if layer_raw is None:
+                    layer_raw = "-"
+                if isinstance(layer_raw, list):
+                    layer_str = ", ".join(str(x) for x in layer_raw)
+                else:
+                    layer_str = str(layer_raw)
+                msg = f"流数据 {sid} 标识为{tags_str}, 下游发往 {layer_str}"
+                rows.append((t_ms, seq, msg))
+                seq += 1
 
-    def _build_crash_index(self) -> dict[str, list[int]]:
-        """Map vm_id -> sorted list of crash timestamps."""
-        index: dict[str, list[int]] = {}
-        for ev in self.data.by_type.get("vm_lifecycle", []):
-            if ev.get("operation") == "crash":
-                vm_id = str(ev.get("vm_id", ""))
-                index.setdefault(vm_id, []).append(ev["t"])
-        for times in index.values():
-            times.sort()
-        return index
-
-    def _is_crash(self, vm_id: str, timestamp: int, crash_index: dict[str, list[int]]) -> bool:
-        times = crash_index.get(vm_id)
-        if not times:
-            return False
-        idx = bisect.bisect_left(times, timestamp - self._CRASH_WINDOW_MS)
-        return idx < len(times) and times[idx] <= timestamp + self._CRASH_WINDOW_MS
+        rows.sort(key=lambda item: (-item[0], -item[1]))
+        rows = rows[: self._RESOURCE_LOG_MAX]
+        rows.sort(key=lambda item: (item[0], item[1]))
+        ret = [{"time": t, "message": text} for t, _, text in rows]
+        ret.reverse()
+        return ret
 
     def get_targets(self, sim_time: int) -> list[int]:
-        targets: set[int] = set()
-        for ev in self._iter_type_callchain_events():
-            if ev["t"] > sim_time:
-                continue
-            details = ev.get("details") or {}
-            raw = details.get("type")
-            if raw is not None:
-                try:
-                    targets.add(int(raw))
-                except (TypeError, ValueError):
-                    pass
-        return sorted(targets)
+        """从契约版 type_callchain（v2）成功解析记录中抽取目标 biz_type 列表。"""
+        records, _ = parse_type_callchain_dataset(self.data.events, sim_time=sim_time)
+        return distinct_biz_types(records)
 
     def get_target_call_chain(self, sim_time: int, target_id: int) -> dict[str, Any]:
-        target_str = str(target_id)
-        crash_index = self._build_crash_index()
-
-        relevant = [
-            ev for ev in self._iter_type_callchain_events()
-            if ev["t"] <= sim_time
-            and (ev.get("details") or {}).get("type") == target_str
-        ]
-        relevant.sort(key=lambda ev: ev["t"])
-
-        recognition_mods: set[str] = set()
-        fusion_mods: set[str] = set()
-        records: list[dict[str, Any]] = []
-
-        for timestamp, group in groupby(relevant, key=lambda ev: ev["t"]):
-            events_in_group = list(group)
-            had_modules = bool(recognition_mods or fusion_mods)
-            has_crash = False
-            has_added = False
-            has_removed_non_crash = False
-
-            for ev in events_in_group:
-                details = ev.get("details") or {}
-                vm_id = str(details.get("vmId", ""))
-                layer = str(details.get("layer", "")).upper()
-                decision = ev.get("decision_type", "")
-
-                if decision == "ADDED":
-                    has_added = True
-                    if layer == "RECOGNIZER":
-                        recognition_mods.add(vm_id)
-                    elif layer == "ANALYZER":
-                        fusion_mods.add(vm_id)
-                elif decision == "REMOVED":
-                    if self._is_crash(vm_id, timestamp, crash_index):
-                        has_crash = True
-                    else:
-                        has_removed_non_crash = True
-                        recognition_mods.discard(vm_id)
-                        fusion_mods.discard(vm_id)
-
-            event_label = self._determine_event_label(
-                had_modules=had_modules,
-                has_added=has_added,
-                has_crash=has_crash,
-                has_removed_non_crash=has_removed_non_crash,
-                modules_remain=bool(recognition_mods or fusion_mods),
-            )
-
-            records.append({
-                "time": timestamp,
-                "recognition_mods": sorted(recognition_mods),
-                "fusion_mods": sorted(fusion_mods),
-                "event": event_label,
-            })
-
-        return {"sim_time": sim_time, "records": records}
-
-    @staticmethod
-    def _determine_event_label(
-        *,
-        had_modules: bool,
-        has_added: bool,
-        has_crash: bool,
-        has_removed_non_crash: bool,
-        modules_remain: bool,
-    ) -> str:
-        """Pick the most significant event label for a timestamp group.
-
-        Priority: 节点损毁 > 初始分配 > 负载均衡/微服务扩容 > 微服务缩容 > 处理完毕
-        """
-        if has_crash:
-            return "节点损毁"
-        if has_added and not had_modules:
-            return "初始分配"
-        if has_added:
-            return "负载均衡/微服务扩容"
-        if has_removed_non_crash and modules_remain:
-            return "微服务缩容"
-        if has_removed_non_crash and not modules_remain:
-            return "处理完毕"
-        return "未知"
+        """按 target_id 过滤 v2 成功记录，并映射为既有 target-hist API（含 reason_event -> event 中文）。"""
+        records, _errors = parse_type_callchain_dataset(self.data.events, sim_time=sim_time)
+        filtered = [rec for rec in records if biz_matches_target(rec["bizType"], target_id)]
+        api_records = [type_callchain_to_target_hist_record(rec) for rec in filtered]
+        return {"sim_time": sim_time, "records": api_records}
 
     def get_timeline(self, start_time: int, end_time: int, interval_ms: int = 1000) -> dict[str, Any]:
         if interval_ms <= 0:
@@ -572,6 +597,8 @@ class SimulationDataProcessor:
         snapshots = data.by_type.get("resource_snapshot", [])
         cpu_values: list[float] = []
         memory_values: list[float] = []
+        resource_hi: list[float] = []
+        resource_lo: list[float] = []
         host_counts: list[int] = []
         vm_counts: list[int] = []
         queue_lengths: list[int] = []
@@ -581,8 +608,12 @@ class SimulationDataProcessor:
             host_counts.append(len(hosts))
             total_vms = 0
             for host in hosts:
-                cpu_values.append(_safe_float(host.get("cpu_usage")))
-                memory_values.append(_safe_float(host.get("memory_usage")))
+                c = _safe_float(host.get("cpu_usage"))
+                m = _safe_float(host.get("memory_usage"))
+                cpu_values.append(c)
+                memory_values.append(m)
+                resource_hi.append(max(c, m))
+                resource_lo.append(max(c, m))
                 total_vms += _safe_int(host.get("vm_count"), len(host.get("vms", []) or []))
                 for vm in host.get("vms", []) or []:
                     queue_lengths.append(_safe_int(vm.get("queue_length")))
@@ -620,6 +651,10 @@ class SimulationDataProcessor:
             "memory_stats": {
                 "avg": mean(memory_values) if memory_values else 0,
                 "peak": max(memory_values) if memory_values else 0,
+            },
+            "resource_stats": {
+                "peak": max(resource_hi) if resource_hi else 0.0,
+                "valley": _min_positive(resource_lo),
             },
             "queue_stats": {
                 "peak": max(queue_lengths) if queue_lengths else 0,

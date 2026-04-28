@@ -102,6 +102,7 @@ class ReplayService:
         summary = (await self._get_processor(task_id, task=task)).get_summary()
         summary["detector_count"] = undamaged_detector_count_for_task(task)
         summary["target_count_peak"] = workload_peak_packets_per_second_for_task(task)
+        summary["interruption_count"] = 0
         return summary
 
     async def get_latest_snapshot_time_at_or_before(
@@ -152,3 +153,6 @@ class ReplayService:
 
     async def get_resource_log(self, task_id: str, sim_time: int) -> list[dict[str, Any]]:
         return (await self._get_processor(task_id)).get_algorithm_resource_messages(sim_time)
+
+    async def get_tag_log(self, task_id: str, sim_time: int) -> list[dict[str, Any]]:
+        return (await self._get_processor(task_id)).get_algorithm_tag_messages(sim_time)

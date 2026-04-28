@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import List
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Directory that contains the `app` package (repository root when installed from source)
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-
+if getattr(sys, 'frozen', False):
+    # 打包环境：sys.executable 是 sim_backend/sim_backend.exe
+    # 向上退两级，将根目录指向部署包的最外层 (即 start.bat 所在位置)
+    _REPO_ROOT = Path(sys.executable).parent.parent
+    _SIM_DIR_DEFAULT = Path("microserviceSim")
+else:
+    # 开发环境：保持原样
+    _REPO_ROOT = Path(__file__).resolve().parent.parent
+    _SIM_DIR_DEFAULT = Path("../microserviceSim")
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -16,22 +23,19 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
     )
 
-    # Anchor for resolving relative DATA_DIR / SIM_PROJECT_DIR / DB_PATH (default: this repo)
     BACKEND_ROOT: Path = Field(default_factory=lambda: _REPO_ROOT)
 
+    # 以下所有的目录，现在都会自动建立在部署包的最外层！
     DATA_DIR: Path = Field(default_factory=lambda: Path("data"))
-    SIM_PROJECT_DIR: Path = Field(default_factory=lambda: Path("../microserviceSim"))
+    SIM_PROJECT_DIR: Path = Field(default_factory=lambda: _SIM_DIR_DEFAULT)
     DB_PATH: Path = Field(default_factory=lambda: Path("data/sim_tasks.db"))
+    SOURCE_DATA_DIR: Path = Field(default_factory=lambda: Path("datasources"))
+    
     MVN_COMMAND: str = "mvn"
     MVN_QUIET: bool = True
     CORS_ORIGINS: List[str] = ["*"]
     MAX_CONCURRENT_TASKS: int = 5
-
-    # Replay: max parsed JSONL processors kept in memory (LRU by last access). <=0 = unlimited.
     REPLAY_PROCESSOR_CACHE_MAX: int = 64
-
-    # Simulation workload CSV directory (relative paths use BACKEND_ROOT)
-    SOURCE_DATA_DIR: Path = Field(default_factory=lambda: Path("datasources"))
 
     @model_validator(mode="after")
     def _resolve_paths(self) -> Settings:

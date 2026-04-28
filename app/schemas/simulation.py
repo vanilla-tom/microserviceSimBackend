@@ -184,6 +184,11 @@ class LatencySummary(BaseModel):
     count: int = 0
 
 
+class ResourceStatsSummary(BaseModel):
+    peak: float = 0.0
+    valley: float = 0.0
+
+
 class SimulationSummaryResponse(BaseModel):
     sim_time_min: int
     sim_time_max: int
@@ -193,12 +198,14 @@ class SimulationSummaryResponse(BaseModel):
     vm_stats: SummaryBucket
     cpu_stats: SummaryBucket
     memory_stats: SummaryBucket
+    resource_stats: ResourceStatsSummary
     queue_stats: QueueSummary
     latency_stats: LatencySummary
     event_counts: Dict[str, int]
     parse_errors: int = 0
     detector_count: int = 0
     target_count_peak: int = 0
+    interruption_count: int = 0
 
 
 class TargetsResponse(BaseModel):
@@ -206,7 +213,10 @@ class TargetsResponse(BaseModel):
 
 
 class TargetCallChainRecord(BaseModel):
+    """target-hist 单条记录（与历史版本字段一致；event 由 reason_event 映射而来）。"""
+
     time: int
+    preprocess_mods: List[str] = Field(default_factory=list)
     recognition_mods: List[str]
     fusion_mods: List[str]
     event: str

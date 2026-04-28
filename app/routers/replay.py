@@ -162,7 +162,7 @@ async def get_target_hist(
     target_id: int = Query(..., description="Target ID"),
     replay: ReplayService = Depends(get_replay_service),
 ):
-    """Get per-target call-chain history with heuristic event attribution."""
+    """按 target_id 返回调用链历史（字段与旧版一致；event 由 reason_event 映射）。"""
     return await replay.get_target_call_chain(task_id, sim_time, target_id)
 
 

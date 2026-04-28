@@ -31,20 +31,22 @@ def _get_semaphore() -> asyncio.Semaphore:
 
 def _build_mvn_command(config_path: Path) -> list[str]:
     """Build the Maven command to launch the simulation."""
+    jar_path = settings.SIM_PROJECT_DIR / "microservice-sim-1.0-SNAPSHOT-jar-with-dependencies.jar"
+    return ["java", "-jar", str(jar_path.resolve()), "--config", str(config_path.resolve())]
     cmd = [settings.MVN_COMMAND]
     if settings.MVN_QUIET:
         cmd.append("-q")
     cmd.append("exec:java")
 
     abs_config = str(config_path.resolve())
-    # exec-maven-plugin splits exec.args on whitespace internally,
-    # so the entire value is one -D property.
     cmd.append(f'-Dexec.args=--config {abs_config}')
     return cmd
 
 
 def _build_shell_command(config_path: Path) -> str:
-    """Build a single shell command string for Windows."""
+    # """Build a single shell command string for Windows."""
+    jar_path = settings.SIM_PROJECT_DIR / "microservice-sim-1.0-SNAPSHOT-jar-with-dependencies.jar"
+    return f'java -jar "{jar_path.resolve()}" --config "{config_path.resolve()}"'
     parts = [settings.MVN_COMMAND]
     if settings.MVN_QUIET:
         parts.append("-q")

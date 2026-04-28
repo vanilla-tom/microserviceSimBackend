@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,8 +37,21 @@ from app.utils.file_helpers import (
 )
 
 
-def _generate_task_id() -> str:
-    return f"sim_{int(time.time())}_{uuid4().hex[:6]}"
+def _slug_for_task_id(value: str, max_len: int) -> str:
+    """Filesystem-safe segment: lowercase [a-z0-9] and hyphens, truncated."""
+    s = value.strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    s = s[:max_len].rstrip("-")
+    return s if s else "na"
+
+
+def _generate_task_id(params: SimulationLaunchParams) -> str:
+    sc = _slug_for_task_id(params.scenario, 32)
+    ds = _slug_for_task_id(params.data_source, 24)
+    nf = "1" if params.enable_node_failure else "0"
+    sf = "1" if params.enable_sensor_failure else "0"
+    suffix = f"{int(time.time())}_{uuid4().hex[:6]}"
+    return f"sim_{sc}-{ds}-nf{nf}sf{sf}-{suffix}"
 
 
 def _workload_csv_filename(params: SimulationLaunchParams) -> str:
@@ -61,7 +75,7 @@ class SimulationService:
         launch_params: SimulationLaunchParams,
         config_upload: Optional[bytes] = None,
     ) -> str:
-        task_id = _generate_task_id()
+        task_id = _generate_task_id(launch_params)
         try:
             config_path, output_dir = await setup_task_directory(
                 settings.DATA_DIR, task_id
